@@ -32,6 +32,23 @@ def student_hostel_dashboard(request):
         status__in=['pending_payment', 'paid'],
     ).select_related('bed_space__room__hostel').first()
 
+    if request.method == 'POST':
+        action = request.POST.get('action')
+        if action == 'generate_invoice' and allocation and allocation.status == 'pending_payment':
+            import uuid
+            ref = str(uuid.uuid4())[:12].upper()
+            allocation.payment_reference = f"RRR-{ref}"
+            allocation.save(update_fields=['payment_reference'])
+            messages.success(request, f'Hostel invoice RRR-{ref} generated successfully.')
+            return redirect('hostels:student_dashboard')
+            
+        elif action == 'verify_payment' and allocation and allocation.status == 'pending_payment' and allocation.payment_reference:
+            allocation.status = 'paid'
+            allocation.payment_date = timezone.now()
+            allocation.save(update_fields=['status', 'payment_date'])
+            messages.success(request, 'Hostel payment verified successfully! Your bed space is now secured.')
+            return redirect('hostels:student_dashboard')
+
     # All hostels with their rooms
     hostels = Hostel.objects.prefetch_related('rooms__bed_spaces').all()
 

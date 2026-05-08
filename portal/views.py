@@ -1944,24 +1944,6 @@ def timetable_view(request):
 
 @login_required_portal
 @role_required('student')
-def hostel_view(request):
-    """Hostel / accommodation information."""
-    user = request.user
-    fees_cleared, total_paid, total_due = _check_student_clearance(user)
-    
-    if not fees_cleared:
-        messages.warning(request, 'Hostel portal access is restricted until fees are cleared.')
-        return redirect('portal:dashboard')
-
-    fee_structure = FeeStructure.objects.filter(is_active=True).first()
-    return render(request, 'students/hostel.html', {
-        'fee_structure': fee_structure,
-        'page_title': 'Hostel & Accommodation',
-    })
-
-
-@login_required_portal
-@role_required('student')
 def change_programme_view(request):
     """Change of programme request."""
     user = request.user

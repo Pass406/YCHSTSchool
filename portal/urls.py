@@ -54,7 +54,6 @@ urlpatterns = [
 
     # ── NSUK-matching student pages ──────────────────────────────
     path('timetable/', views.timetable_view, name='timetable'),
-    path('hostel/', views.hostel_view, name='hostel'),
     path('change-programme/', views.change_programme_view, name='change_programme'),
     path('my-documents/', views.my_documents_view, name='my_documents'),
     path('clearance/', views.clearance_view, name='clearance'),
