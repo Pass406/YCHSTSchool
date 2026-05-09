@@ -65,6 +65,24 @@ class HostelAllocation(models.Model):
     payment_reference = models.CharField(max_length=50, blank=True, null=True)
     allocated_at = models.DateTimeField(auto_now_add=True)
     payment_date = models.DateTimeField(null=True, blank=True)
+
+    # Payment gateway tracking
+    GATEWAY_CHOICES = [
+        ('paystack', 'Paystack'),
+        ('flutterwave', 'Flutterwave'),
+        ('manual', 'Manual / Offline'),
+    ]
+    payment_gateway = models.CharField(
+        max_length=20,
+        choices=GATEWAY_CHOICES,
+        default='paystack',
+        help_text="Payment gateway used to process this transaction",
+    )
+    gateway_response = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Raw response data returned by the payment gateway",
+    )
     
     def __str__(self):
         return f"{self.student.get_full_name()} - {self.bed_space}"

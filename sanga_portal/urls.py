@@ -24,6 +24,9 @@ urlpatterns = [
     path('clearance/', include('clearance.urls')),
     path('', include('portal.urls')),
 
+    # Payment gateway webhooks
+    path('payments/', include('payments.urls')),
+
     # REST API (preserved)
     path('api/auth/', include('accounts.urls')),
     path('api/students/', include('students.urls')),

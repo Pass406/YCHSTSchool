@@ -1,12 +1,25 @@
-from rest_framework import generics, status, permissions
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
+import logging
+import uuid
+
+from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
-from .models import FeeStructure, FeePayment, OtherPayment
-from .serializers import FeeStructureSerializer, FeePaymentSerializer, OtherPaymentSerializer
+from rest_framework import generics, permissions, status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+
 from accounts.models import StudentProfile
 from accounts.matric_utils import generate_matriculation_number
+from payments.gateway import PaystackGateway, PaystackError
+
+from .models import FeeStructure, FeePayment, OtherPayment
+from .serializers import (
+    FeePaymentSerializer,
+    FeeStructureSerializer,
+    OtherPaymentSerializer,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class FeeStructureListView(generics.ListAPIView):
@@ -104,78 +117,199 @@ def student_fees_dashboard(request):
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def initiate_online_payment(request):
-    """Initiate online payment for fees"""
+    """
+    Initiate an online fee payment via Paystack.
+
+    Expected request body:
+        {
+            "amount":       "5000.00",   // Naira
+            "purpose":      "tuition_fee",
+            "callback_url": "https://…"  // optional — where Paystack redirects after payment
+        }
+
+    Returns:
+        {
+            "payment_id":          <int>,
+            "transaction_reference": "TXN-…",
+            "authorization_url":   "https://checkout.paystack.com/…",
+            "amount":              "5000.00",
+            "status":              "pending"
+        }
+    """
     user = request.user
     amount = request.data.get('amount')
     purpose = request.data.get('purpose', 'tuition_fee')
-    
+    callback_url = request.data.get('callback_url', '')
+
     if not amount:
-        return Response({'error': 'Amount is required'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Generate transaction reference
-    import uuid
-    transaction_ref = str(uuid.uuid4())[:20].upper()
-    
-    # Create pending payment record
+        return Response(
+            {'error': 'Amount is required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Require a valid email — Paystack mandates it
+    email = user.email
+    if not email:
+        return Response(
+            {'error': 'Your account does not have an email address. '
+                      'Please contact the bursary to update your record.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Generate a unique transaction reference
+    transaction_ref = f"TXN-{uuid.uuid4().hex[:16].upper()}"
+
+    # Persist a pending payment record before hitting the gateway so we
+    # always have a local record even if the redirect is never completed.
     payment = FeePayment.objects.create(
         student=user,
         amount=amount,
         payment_method='online',
         transaction_reference=transaction_ref,
         purpose=purpose,
-        status='pending'
+        status='pending',
+        payment_gateway='paystack',
     )
-    
-    # TODO: Integrate with payment gateway (Paystack, Flutterwave, etc.)
-    # For now, return payment details
-    
+
+    # Call Paystack to get the checkout URL
+    try:
+        gateway = PaystackGateway()
+        result = gateway.initialize_payment(
+            amount=payment.amount,
+            email=email,
+            reference=transaction_ref,
+            callback_url=callback_url or None,
+            metadata={
+                'payment_id': payment.pk,
+                'student_id': user.pk,
+                'purpose': purpose,
+            },
+        )
+    except PaystackError as exc:
+        # Mark the payment as failed so the student can retry cleanly
+        payment.status = 'failed'
+        payment.save(update_fields=['status'])
+        logger.error(
+            "Paystack initialisation failed for user %s ref %s: %s",
+            user.username, transaction_ref, exc,
+        )
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    logger.info(
+        "Payment initiated: user=%s ref=%s amount=%s",
+        user.username, transaction_ref, amount,
+    )
+
     return Response({
         'payment_id': payment.id,
         'transaction_reference': transaction_ref,
-        'amount': amount,
+        'authorization_url': result['authorization_url'],
+        'amount': str(payment.amount),
         'status': 'pending',
-        'message': 'Payment initiated. Complete payment using the reference.',
-        # In production, this would include payment gateway redirect URL
     })
 
 
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def verify_payment(request):
-    """Verify payment status and assign matriculation number if needed"""
+    """
+    Verify a fee payment against the Paystack API.
+
+    Expected request body:
+        {"transaction_reference": "TXN-…"}
+
+    The view calls Paystack's /transaction/verify endpoint and only marks
+    the payment as completed when Paystack confirms the charge succeeded.
+    If the payment is already completed (e.g. confirmed via webhook earlier)
+    the stored status is returned immediately without a redundant API call.
+    """
     transaction_ref = request.data.get('transaction_reference')
-    
+
     if not transaction_ref:
-        return Response({'error': 'Transaction reference is required'}, status=status.HTTP_400_BAD_REQUEST)
-    
+        return Response(
+            {'error': 'Transaction reference is required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
         payment = FeePayment.objects.get(transaction_reference=transaction_ref)
     except FeePayment.DoesNotExist:
-        return Response({'error': 'Payment not found'}, status=status.HTTP_404_NOT_FOUND)
-    
-    # TODO: Verify with payment gateway
-    # For now, just mark as completed
-    
-    if payment.status == 'pending':
+        return Response(
+            {'error': 'Payment not found'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Ownership check — students may only verify their own payments
+    if payment.student != request.user and not request.user.is_staff:
+        return Response(
+            {'error': 'You do not have permission to verify this payment.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # Already confirmed (possibly via webhook) — return current state
+    if payment.status == 'completed':
+        return Response({
+            'payment_id': payment.id,
+            'status': payment.status,
+            'amount': str(payment.amount),
+            'verified_at': payment.verified_at,
+            'message': 'Payment already verified.',
+        })
+
+    # Verify with Paystack
+    try:
+        gateway = PaystackGateway()
+        result = gateway.verify_payment(transaction_ref)
+    except PaystackError as exc:
+        logger.error(
+            "Paystack verification failed for ref %s: %s", transaction_ref, exc
+        )
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    if result['paid']:
         payment.status = 'completed'
         payment.verified_by = request.user
         payment.verified_at = timezone.now()
-        payment.save()
-        
-        # Get or create student profile with matriculation number
+        payment.gateway_response = result['raw']
+        payment.save(
+            update_fields=['status', 'verified_by', 'verified_at', 'gateway_response']
+        )
+
+        # Update student's cumulative fees paid
         try:
             profile = payment.student.student_profile
-            # Update total fees paid
             profile.total_fees_paid += payment.amount
             profile.save(update_fields=['total_fees_paid'])
         except StudentProfile.DoesNotExist:
-            # Student should already have a profile at this point
-            # (created during clearance approval)
-            print(f"Warning: No StudentProfile found for {payment.student.username} during payment verification")
-    
+            logger.warning(
+                "No StudentProfile found for %s during payment verification",
+                payment.student.username,
+            )
+
+        logger.info(
+            "FeePayment %s verified successfully via Paystack (ref=%s, user=%s)",
+            payment.pk, transaction_ref, request.user.username,
+        )
+    else:
+        # Paystack returned a non-success status (failed, abandoned, etc.)
+        payment.status = 'failed'
+        payment.gateway_response = result['raw']
+        payment.save(update_fields=['status', 'gateway_response'])
+        logger.warning(
+            "Paystack verification returned status '%s' for ref %s",
+            result['status'], transaction_ref,
+        )
+
     return Response({
         'payment_id': payment.id,
         'status': payment.status,
-        'amount': payment.amount,
+        'amount': str(payment.amount),
         'verified_at': payment.verified_at,
+        'gateway_status': result['status'],
     })

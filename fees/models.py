@@ -203,6 +203,24 @@ class FeePayment(models.Model):
     )
     verified_at = models.DateTimeField(null=True, blank=True)
     
+    # Payment gateway tracking
+    GATEWAY_CHOICES = [
+        ('paystack', 'Paystack'),
+        ('flutterwave', 'Flutterwave'),
+        ('manual', 'Manual / Offline'),
+    ]
+    payment_gateway = models.CharField(
+        max_length=20,
+        choices=GATEWAY_CHOICES,
+        default='paystack',
+        help_text="Payment gateway used to process this transaction",
+    )
+    gateway_response = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Raw response data returned by the payment gateway",
+    )
+
     # Receipt
     receipt_number = models.CharField(max_length=50, unique=True, null=True, blank=True)
     receipt_file = models.FileField(upload_to='receipts/', null=True, blank=True)
