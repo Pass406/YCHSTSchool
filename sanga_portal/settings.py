@@ -22,7 +22,7 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-this-in-produc
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', 'www.ychst.edu.ng').split(',')
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', 'www.ychst.edu.ng','ychst.edu.ng').split(',')
 RENDER_EXTERNAL_HOSTNAME = config('RENDER_EXTERNAL_HOSTNAME', default=None)
 if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
@@ -235,6 +235,7 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = [
     "https://www.ychst.edu.ng",
     "http://127.0.0.1:3000",
+    "www.ychst.edu.ng",
 ]
 
 # CSRF Trusted Origins
