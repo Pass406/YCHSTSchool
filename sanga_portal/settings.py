@@ -232,12 +232,12 @@ SIMPLE_JWT = {
 
 # CORS settings
 CORS_ALLOWED_ORIGINS = [
-    "www.ychst.edu.ng",
+    "https://www.ychst.edu.ng",
     "http://127.0.0.1:3000",
 ]
 
-# CSRF Trusted Origins for Render
-CSRF_TRUSTED_ORIGINS = [f"https://{host}" for host in ALLOWED_HOSTS if host not in ('www.ychst.edu.ng', '127.0.0.1')]
+# CSRF Trusted Origins
+CSRF_TRUSTED_ORIGINS = [f"https://{host}" for host in ALLOWED_HOSTS if host not in ('127.0.0.1',)]
 if RENDER_EXTERNAL_HOSTNAME:
     CSRF_TRUSTED_ORIGINS.append(f"https://{RENDER_EXTERNAL_HOSTNAME}")
 
