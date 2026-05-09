@@ -7,3 +7,4 @@ Pillow
 reportlab
 gunicorn
 whitenoise
+requests==2.32.3

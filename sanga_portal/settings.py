@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'admissions',
     'hostels',
     'clearance',
+    'payments',
 ]
 
 MIDDLEWARE = [
@@ -251,3 +252,14 @@ EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 
 # OTP settings
 OTP_EXPIRY_MINUTES = config('OTP_EXPIRY_MINUTES', default=10, cast=int)
+
+# ─── Paystack Payment Gateway ─────────────────────────────────────────────────
+# Register your account at https://dashboard.paystack.com/ and add these keys
+# to your .env file (or Railway environment variables in production).
+#
+#   PAYSTACK_SECRET_KEY=sk_live_…   (never expose this to the browser)
+#   PAYSTACK_PUBLIC_KEY=pk_live_…   (safe to use in frontend JavaScript)
+#
+# Use test keys (sk_test_… / pk_test_…) during development.
+PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY', default='')
+PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY', default='')

@@ -3,13 +3,21 @@ Hostel views — fully template-based Django views (not DRF).
 Covers the student hostel dashboard, bed application, and admin management.
 """
 
+import logging
+import uuid
+
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.utils import timezone
 from django.http import JsonResponse
 
+from payments.gateway import PaystackGateway, PaystackError
+
 from .models import Hostel, Room, BedSpace, HostelAllocation
+
+logger = logging.getLogger(__name__)
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -34,20 +42,95 @@ def student_hostel_dashboard(request):
 
     if request.method == 'POST':
         action = request.POST.get('action')
+
         if action == 'generate_invoice' and allocation and allocation.status == 'pending_payment':
-            import uuid
-            ref = str(uuid.uuid4())[:12].upper()
-            allocation.payment_reference = f"RRR-{ref}"
-            allocation.save(update_fields=['payment_reference'])
-            messages.success(request, f'Hostel invoice RRR-{ref} generated successfully.')
+            # Generate a Paystack transaction reference and initialise the payment
+            ref = f"HST-{uuid.uuid4().hex[:12].upper()}"
+            email = user.email
+
+            if not email:
+                messages.error(
+                    request,
+                    'Your account does not have an email address. '
+                    'Please contact the hostel office to update your record.',
+                )
+                return redirect('hostels:student_dashboard')
+
+            hostel_price = allocation.bed_space.room.hostel.price_per_session
+
+            try:
+                gateway = PaystackGateway()
+                result = gateway.initialize_payment(
+                    amount=hostel_price,
+                    email=email,
+                    reference=ref,
+                    metadata={
+                        'allocation_id': allocation.pk,
+                        'student_id': user.pk,
+                        'purpose': 'hostel_fee',
+                    },
+                )
+                allocation.payment_reference = ref
+                allocation.payment_gateway = 'paystack'
+                allocation.save(update_fields=['payment_reference', 'payment_gateway'])
+                messages.success(
+                    request,
+                    f'Hostel invoice generated (ref: {ref}). '
+                    'Proceed to payment using the link sent to your email or '
+                    'click "Pay Now" to complete your payment.',
+                )
+                # Store the authorization URL in the session so the template
+                # can offer a direct "Pay Now" button.
+                request.session['hostel_payment_url'] = result['authorization_url']
+            except PaystackError as exc:
+                logger.error(
+                    "Paystack invoice generation failed for allocation %s: %s",
+                    allocation.pk, exc,
+                )
+                messages.error(
+                    request,
+                    f'Could not generate payment invoice: {exc}. Please try again.',
+                )
             return redirect('hostels:student_dashboard')
-            
+
         elif action == 'verify_payment' and allocation and allocation.status == 'pending_payment' and allocation.payment_reference:
-            allocation.status = 'paid'
-            allocation.payment_date = timezone.now()
-            allocation.save(update_fields=['status', 'payment_date'])
-            messages.success(request, 'Hostel payment verified successfully! Your bed space is now secured.')
+            # Verify the payment with Paystack before marking as paid
+            try:
+                gateway = PaystackGateway()
+                result = gateway.verify_payment(allocation.payment_reference)
+            except PaystackError as exc:
+                logger.error(
+                    "Paystack verification failed for allocation %s ref %s: %s",
+                    allocation.pk, allocation.payment_reference, exc,
+                )
+                messages.error(
+                    request,
+                    f'Payment verification failed: {exc}. Please try again or contact support.',
+                )
+                return redirect('hostels:student_dashboard')
+
+            if result['paid']:
+                allocation.status = 'paid'
+                allocation.payment_date = timezone.now()
+                allocation.gateway_response = result['raw']
+                allocation.save(update_fields=['status', 'payment_date', 'gateway_response'])
+                logger.info(
+                    "HostelAllocation %s marked paid via student verification (ref=%s)",
+                    allocation.pk, allocation.payment_reference,
+                )
+                messages.success(
+                    request,
+                    'Hostel payment verified successfully! Your bed space is now secured.',
+                )
+            else:
+                messages.warning(
+                    request,
+                    f'Payment not confirmed by gateway (status: {result["status"]}). '
+                    'If you have completed payment, please wait a few minutes and try again.',
+                )
             return redirect('hostels:student_dashboard')
+
+
 
     # All hostels with their rooms
     hostels = Hostel.objects.prefetch_related('rooms__bed_spaces').all()
@@ -233,18 +316,87 @@ def admin_hostel_dashboard(request):
 
 @login_required
 def admin_confirm_payment(request, allocation_id):
-    """Admin confirms payment for a pending allocation."""
-    if request.method == 'POST':
-        allocation = get_object_or_404(HostelAllocation, pk=allocation_id)
-        allocation.status = 'paid'
-        allocation.payment_date = timezone.now()
-        allocation.payment_reference = request.POST.get('payment_ref', '')
-        allocation.save()
-        messages.success(
-            request,
-            f'Payment confirmed for {allocation.student.get_full_name()} — '
-            f'{allocation.bed_space.room.hostel.name} Room {allocation.bed_space.room.room_number}'
-        )
+    """
+    Admin confirms payment for a pending hostel allocation.
+
+    Behaviour:
+    - If the allocation already has a Paystack payment_reference, the gateway
+      is queried first and the allocation is only marked paid when Paystack
+      confirms the charge succeeded.
+    - If a manual payment_ref is supplied (cash / bank transfer), the admin
+      can override and mark as paid directly — this is recorded with
+      payment_gateway='manual' so it is auditable.
+    - Admins with appropriate roles can always force-confirm regardless of
+      gateway status (e.g. for offline payments).
+    """
+    if request.method != 'POST':
+        return redirect('hostels:admin_dashboard')
+
+    allocation = get_object_or_404(HostelAllocation, pk=allocation_id)
+    manual_ref = request.POST.get('payment_ref', '').strip()
+    force_confirm = request.POST.get('force_confirm', '') == '1'
+
+    # ── Case 1: allocation has a Paystack reference — verify with gateway ──
+    if allocation.payment_reference and not force_confirm:
+        try:
+            gateway = PaystackGateway()
+            result = gateway.verify_payment(allocation.payment_reference)
+        except PaystackError as exc:
+            logger.error(
+                "Admin Paystack verification failed for allocation %s ref %s: %s",
+                allocation.pk, allocation.payment_reference, exc,
+            )
+            messages.error(
+                request,
+                f'Gateway verification failed: {exc}. '
+                'Use "Force Confirm" to override for offline payments.',
+            )
+            return redirect('hostels:admin_dashboard')
+
+        if result['paid']:
+            allocation.status = 'paid'
+            allocation.payment_date = timezone.now()
+            allocation.gateway_response = result['raw']
+            allocation.save(update_fields=['status', 'payment_date', 'gateway_response'])
+            logger.info(
+                "HostelAllocation %s confirmed by admin via Paystack (ref=%s, admin=%s)",
+                allocation.pk, allocation.payment_reference, request.user.username,
+            )
+            messages.success(
+                request,
+                f'Payment confirmed for {allocation.student.get_full_name()} — '
+                f'{allocation.bed_space.room.hostel.name} '
+                f'Room {allocation.bed_space.room.room_number} '
+                f'(Paystack verified ✓)',
+            )
+        else:
+            messages.warning(
+                request,
+                f'Paystack reports payment status as "{result["status"]}" for '
+                f'{allocation.student.get_full_name()}. '
+                'Use "Force Confirm" to override for offline payments.',
+            )
+        return redirect('hostels:admin_dashboard')
+
+    # ── Case 2: manual / offline payment or force-confirm ─────────────────
+    if manual_ref:
+        allocation.payment_reference = manual_ref
+    allocation.status = 'paid'
+    allocation.payment_date = timezone.now()
+    allocation.payment_gateway = 'manual'
+    allocation.save(update_fields=[
+        'status', 'payment_date', 'payment_reference', 'payment_gateway'
+    ])
+    logger.info(
+        "HostelAllocation %s manually confirmed by admin %s (ref=%s)",
+        allocation.pk, request.user.username, allocation.payment_reference,
+    )
+    messages.success(
+        request,
+        f'Payment manually confirmed for {allocation.student.get_full_name()} — '
+        f'{allocation.bed_space.room.hostel.name} '
+        f'Room {allocation.bed_space.room.room_number}',
+    )
     return redirect('hostels:admin_dashboard')
 
 
