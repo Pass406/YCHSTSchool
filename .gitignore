@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Database
+db.sqlite3
+db.sqlite3-journal
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Static files (collected)
+staticfiles/
+
+# Media uploads
+media/
+
+# Scratch / temp files
+scratch/
